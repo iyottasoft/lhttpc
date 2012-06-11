@@ -101,7 +101,7 @@ start_link() ->
 %% @hidden
 -spec init(any()) -> {ok, #httpc_man{}}.
 init(_) ->
-    process_flag(priority, high),
+    %process_flag(priority, high),
     {ok, Timeout} = application:get_env(lhttpc, connection_timeout),
     {ok, #httpc_man{timeout = Timeout}}.
 

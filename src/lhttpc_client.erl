@@ -484,6 +484,9 @@ read_chunk_size(Socket, Ssl) ->
 
 reply_chunked_part(_State, [], Window) ->
     Window;
+reply_chunked_part(#client_state{requester = Pid}, Buffer, infinity) ->
+    Pid ! {body_part, self(), list_to_binary(lists:reverse(Buffer))},
+    infinity;
 reply_chunked_part(State = #client_state{requester = Pid}, Buff, 0) ->
     receive
         {ack, Pid} ->

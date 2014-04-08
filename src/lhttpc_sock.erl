@@ -77,9 +77,21 @@ connect(Host, Port, Options, Timeout, false) ->
 -spec recv(socket(), boolean()) ->
     {ok, any()} | {error, atom()} | {error, {http_error, string()}}.
 recv(Socket, true) ->
-    ssl:recv(Socket, 0);
+    ssl:setopts(Socket, [{active, once}]),
+    receive
+      {ssl, Socket, Data} -> {ok, Data};
+      {ssl_error, Socket, Reason} -> {error, Reason};
+      {ssl_closed, Socket} -> {error, closed}
+    end;
+    %%ssl:recv(Socket, 0);
 recv(Socket, false) ->
-    gen_tcp:recv(Socket, 0).
+    inet:setopts(Socket, [{active, once}]),
+    receive
+      {tcp, Socket, Data} -> {ok, Data};
+      {tcp_error, Socket, Reason} -> {error, Reason};
+      {tcp_closed, Socket} -> {error, closed}
+    end.
+    %%gen_tcp:recv(Socket, 0).
 
 %% @spec (Socket, Length, SslFlag) -> {ok, Data} | {error, Reason}
 %%   Socket = socket()

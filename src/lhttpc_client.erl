@@ -432,8 +432,58 @@ read_length(Hdrs, Ssl, Socket, Length) ->
         {error, Reason} ->
             erlang:error(Reason)
     end.
-
-read_partial_chunked_body(State, Hdrs, Window, BufferSize, Buffer, 0) ->
+%
+parse_chunked_buffer(State = #client_state{requester = Pid}, Buffer) ->
+  case binary:split(Buffer, <<"\r\n">>, []) of
+    [ChunkSize, Rest] ->
+      ISize = chunk_size(ChunkSize),
+      case size(Rest) of
+        _ when ISize =:= 0 -> eob;
+        _ when ISize =:= skip -> Rest;
+        X when X =:= ISize -> 
+          Pid ! {body_part, self(), Rest},
+          <<>>;
+        X when X > ISize ->
+          <<Chunk:ISize/binary, RestBuffer/binary>> = Rest,
+          Pid ! {body_part, self(), Chunk},
+          parse_chunked_buffer(State, RestBuffer);
+        _ -> Buffer
+      end;
+    _ -> Buffer
+  end.    
+%
+read_chunked_body_active(State = #client_state{socket= Socket}, Hdrs, Buffer, false) ->
+  receive
+    {tcp, Socket, Data} -> 
+      case parse_chunked_buffer(State, <<Buffer/binary, Data/binary>>) of
+        eob -> %% close
+          reply_end_of_body(State, Hdrs, Hdrs);
+        NewBuffer -> 
+          read_chunked_body_active(State, Hdrs, NewBuffer, false)
+      end;
+    {tcp_error, Socket, Reason} -> erlang:error(Reason);
+    {tcp_closed, Socket} -> erlang:error(closed)
+  end;
+read_chunked_body_active(State = #client_state{socket = Socket}, Hdrs, Buffer, true) ->
+  receive
+    {ssl, Socket, Data} -> 
+      case parse_chunked_buffer(State, <<Buffer/binary, Data/binary>>) of
+        eob -> %% close
+          reply_end_of_body(State, Hdrs, Hdrs);
+        NewBuffer -> 
+          read_chunked_body_active(State, Hdrs, NewBuffer, true)
+      end;
+    {ssl_error, Socket, Reason} -> erlang:error(Reason);
+    {ssl_closed, Socket} -> erlang:error(closed)
+  end.
+%
+read_partial_chunked_body(State, Hdrs, _Window, _BufferSize, _Buffer, 0) ->
+  Socket = State#client_state.socket,
+  Ssl = State#client_state.ssl,
+  lhttpc_sock:setopts(Socket, [{active, true}], Ssl),
+  read_chunked_body_active(State, Hdrs, <<>>, Ssl);
+%
+read_partial_chunked_body(State, Hdrs, Window, BufferSize, Buffer, old_0) ->
     Socket = State#client_state.socket,
     Ssl = State#client_state.ssl,
     PartSize = State#client_state.part_size,
@@ -514,18 +564,38 @@ read_chunked_body(Socket, Ssl, Hdrs, Chunks) ->
             read_chunked_body(Socket, Ssl, Hdrs, [Chunk | Chunks])
     end.
 
+chunk_size(<<"\r\n">>) -> skip;
+chunk_size(<<>>) -> skip;
 chunk_size(Bin) ->
-    erlang:list_to_integer(lists:reverse(chunk_size(Bin, [])), 16).
+  chunk_size(Bin, 0).
+  %%  erlang:list_to_integer(lists:reverse(chunk_size(Bin, [])), 16).
 
-chunk_size(<<$;, _/binary>>, Chars) ->
-    Chars;
-chunk_size(<<"\r\n", _/binary>>, Chars) ->
-    Chars;
-chunk_size(<<$\s, Binary/binary>>, Chars) ->
-    %% Facebook's HTTP server returns a chunk size like "6  \r\n"
-    chunk_size(Binary, Chars);
-chunk_size(<<Char, Binary/binary>>, Chars) ->
-    chunk_size(Binary, [Char | Chars]).
+chunk_size(<<>>, Int) -> Int;
+chunk_size(<<$A, Rest/binary>>, Int) -> chunk_size(Rest, Int*16 + 10);
+chunk_size(<<$B, Rest/binary>>, Int) -> chunk_size(Rest, Int*16 + 11);
+chunk_size(<<$C, Rest/binary>>, Int) -> chunk_size(Rest, Int*16 + 12);
+chunk_size(<<$D, Rest/binary>>, Int) -> chunk_size(Rest, Int*16 + 13);
+chunk_size(<<$E, Rest/binary>>, Int) -> chunk_size(Rest, Int*16 + 14);
+chunk_size(<<$F, Rest/binary>>, Int) -> chunk_size(Rest, Int*16 + 15);
+chunk_size(<<$a, Rest/binary>>, Int) -> chunk_size(Rest, Int*16 + 10);
+chunk_size(<<$b, Rest/binary>>, Int) -> chunk_size(Rest, Int*16 + 11);
+chunk_size(<<$c, Rest/binary>>, Int) -> chunk_size(Rest, Int*16 + 12);
+chunk_size(<<$d, Rest/binary>>, Int) -> chunk_size(Rest, Int*16 + 13);
+chunk_size(<<$e, Rest/binary>>, Int) -> chunk_size(Rest, Int*16 + 14);
+chunk_size(<<$f, Rest/binary>>, Int) -> chunk_size(Rest, Int*16 + 15);
+chunk_size(<<Char:8, Rest/binary>>, Int) when Char > 47, Char < 58 ->
+  chunk_size(Rest, (Int*16+(Char-48)));
+chunk_size(<<_:8, Rest/binary>>, Int) ->
+  chunk_size(Rest, Int).
+%chunk_size(<<$;, _/binary>>, Chars) ->
+%    Chars;
+%chunk_size(<<"\r\n", _/binary>>, Chars) ->
+%    Chars;
+%chunk_size(<<$\s, Binary/binary>>, Chars) ->
+%    %% Facebook's HTTP server returns a chunk size like "6  \r\n"
+%    chunk_size(Binary, Chars);
+%chunk_size(<<Char, Binary/binary>>, Chars) ->
+%    chunk_size(Binary, [Char | Chars]).
 
 read_partial_chunk(Socket, Ssl, ChunkSize, ChunkSize) ->
     {read_chunk(Socket, Ssl, ChunkSize), 0};

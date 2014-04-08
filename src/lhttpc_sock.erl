@@ -77,20 +77,30 @@ connect(Host, Port, Options, Timeout, false) ->
 -spec recv(socket(), boolean()) ->
     {ok, any()} | {error, atom()} | {error, {http_error, string()}}.
 recv(Socket, true) ->
-    ssl:setopts(Socket, [{active, once}]),
-    receive
-      {ssl, Socket, Data} -> {ok, Data};
-      {ssl_error, Socket, Reason} -> {error, Reason};
-      {ssl_closed, Socket} -> {error, closed}
-    end;
+  case erlang:erase(buffer) of
+    undefined ->
+      ssl:setopts(Socket, [{active, once}]),
+      receive
+        {ssl, Socket, Data} -> {ok, Data};
+        {ssl_error, Socket, Reason} -> {error, Reason};
+        {ssl_closed, Socket} -> {error, closed}
+      end;
+    Buffer ->
+      {ok, Buffer}
+  end;
     %%ssl:recv(Socket, 0);
 recv(Socket, false) ->
-    inet:setopts(Socket, [{active, once}]),
-    receive
-      {tcp, Socket, Data} -> {ok, Data};
-      {tcp_error, Socket, Reason} -> {error, Reason};
-      {tcp_closed, Socket} -> {error, closed}
-    end.
+  case erlang:erase(buffer) of
+    undefined ->
+      inet:setopts(Socket, [{active, once}]),
+      receive
+        {tcp, Socket, Data} -> {ok, Data};
+        {tcp_error, Socket, Reason} -> {error, Reason};
+        {tcp_closed, Socket} -> {error, closed}
+      end;
+    Buffer ->
+      {ok, Buffer}
+  end.
     %%gen_tcp:recv(Socket, 0).
 
 %% @spec (Socket, Length, SslFlag) -> {ok, Data} | {error, Reason}
@@ -103,13 +113,37 @@ recv(Socket, false) ->
 %% Receives `Length' bytes from `Socket'.
 %% Will block untill `Length' bytes is available.
 %% @end
+recv(Socket, Length, SslFlag) ->
+  case erlang:erase(buffer) of
+    undefined -> recv(Socket, Length, <<>>, SslFlag);
+    Buffer -> recv(Socket, Length, Buffer, SslFlag)
+  end.
+%  
 -spec recv(socket(), integer(), boolean()) -> {ok, any()} | {error, atom()}.
-recv(_, 0, _) ->
+recv(_, 0, _,  _) ->
     {ok, <<>>};
-recv(Socket, Length, true) ->
-    ssl:recv(Socket, Length);
-recv(Socket, Length, false) ->
-    gen_tcp:recv(Socket, Length).
+recv(_Socket, Length, Buffer, _SslFlag) when size(Buffer) =:= Length ->
+    {ok, Buffer};
+recv(_Socket, Length, Buffer, _SslFlag) when size(Buffer) > Length ->
+    <<Data:Length/binary, Rest/binary>> = Buffer,
+    erlang:put(buffer, Rest),
+    {ok, Data};
+recv(Socket, Length, Buffer, true) ->
+    ssl:setopts(Socket, [{active, once}]),
+    receive
+      {ssl, Socket, Data} -> recv(Socket, Length, <<Buffer/binary, Data/binary>>, true);
+      {ssl_error, Socket, Reason} -> {error, Reason};
+      {ssl_closed, Socket} -> {error, closed}
+    end;
+    %%ssl:recv(Socket, Length);
+recv(Socket, Length, Buffer, false) ->
+    inet:setopts(Socket, [{active, once}]),
+    receive
+      {tcp, Socket, Data} -> recv(Socket, Length, <<Buffer/binary, Data/binary>>, false);
+      {tcp_error, Socket, Reason} -> {error, Reason};
+      {tcp_closed, Socket} -> {error, closed}
+    end.
+    %%gen_tcp:recv(Socket, Length).
 
 %% @spec (Socket, Data, SslFlag) -> ok | {error, Reason}
 %%   Socket = socket()
